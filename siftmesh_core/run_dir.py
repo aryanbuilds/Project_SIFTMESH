@@ -161,6 +161,11 @@ class RunPaths:
         return self.audit / "agent_calls.jsonl"
 
     @property
+    def agent_tokens(self) -> Path:
+        """Per-live-dispatch LLM token usage. One AgentTokenUsage per line (live agents only)."""
+        return self.audit / "agent_tokens.jsonl"
+
+    @property
     def retries(self) -> Path:
         """Retry history ledger (G5). One RetryRecord per line."""
         return self.audit / "retries.jsonl"

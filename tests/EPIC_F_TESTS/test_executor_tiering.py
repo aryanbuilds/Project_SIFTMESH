@@ -34,8 +34,14 @@ def _live_settings(**extra: object):  # type: ignore[no-untyped-def]
     )
 
 
-def test_heavy_tool_bound_constant_covers_image_and_memory() -> None:
-    assert {"extract_artifacts_from_image", "analyze_memory"} == scheduler._HEAVY_TOOL_BOUND
+def test_heavy_tool_bound_covers_image_memory_and_high_volume_parsers() -> None:
+    assert {
+        "extract_artifacts_from_image",
+        "analyze_memory",
+        "parse_mft_filesystem",
+        "parse_usnjrnl",
+        "build_super_timeline",
+    } == scheduler._HEAVY_TOOL_BOUND
 
 
 def test_live_settings_would_select_live_for_a_parse_role() -> None:
@@ -52,6 +58,20 @@ def test_tiering_guard_logic_forces_floor_for_heavy_tools() -> None:
         profile = resolve_profile(c.role, settings=s)
         forced = (
             profile != "deterministic_executor"
+            and not s.live_extraction
+            and any(t in scheduler._HEAVY_TOOL_BOUND for t in c.allowed_tools)
+        )
+        assert forced, f"{tool} should be tiered to the floor under a live agent"
+
+
+def test_high_volume_parsers_tiered_to_floor_under_live() -> None:
+    # $MFT / USN-journal / Plaso super-timeline overflow a live agent's context (it failed to anchor
+    # them in a real run -> quarantined); the floor has working claim builders, so tier them down.
+    s = _live_settings()
+    for tool in ("parse_mft_filesystem", "parse_usnjrnl", "build_super_timeline"):
+        c = _contract(tool, f"{tool}_role")
+        forced = (
+            resolve_profile(c.role, settings=s) != "deterministic_executor"
             and not s.live_extraction
             and any(t in scheduler._HEAVY_TOOL_BOUND for t in c.allowed_tools)
         )

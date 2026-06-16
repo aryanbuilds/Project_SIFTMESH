@@ -89,7 +89,8 @@ def record() -> None:
     if RECORDED_RUN.exists():
         shutil.rmtree(RECORDED_RUN)
     RECORDED_RUN.parent.mkdir(parents=True, exist_ok=True)
-    shutil.copytree(run.root, RECORDED_RUN)
+    # `.idlocks/` holds the transient per-run tool-execution lock - never part of the golden run.
+    shutil.copytree(run.root, RECORDED_RUN, ignore=shutil.ignore_patterns(".idlocks"))
     recorded = RunPaths(root=RECORDED_RUN)
     generate_all_reports(recorded)
 

@@ -40,6 +40,10 @@ from siftmesh_core.ledgers.agent_calls import (
     next_agent_call_id,
     read_agent_calls,
 )
+from siftmesh_core.ledgers.agent_tokens import (
+    append_agent_token_usage,
+    read_agent_token_usage,
+)
 from siftmesh_core.ledgers.claim_ledger import append_claim, read_claims, read_unsupported_claims
 from siftmesh_core.ledgers.custody_ledger import append_event
 from siftmesh_core.ledgers.injection_alerts import (
@@ -209,11 +213,24 @@ def commit_staged_task(run: RunPaths, staged: _Staged, *, evidence_root: Path) -
             evidence_root=evidence_root,
         )
 
-    # 6. Agent call (one per task) - new global AGENT id.
+    # 6. Agent call (one per task) - new global AGENT id; capture the remap for token usage.
+    agent_remap: dict[str, str] = {}
     for ac in read_agent_calls(src.root):
+        new_aid = next_agent_call_id(run.root)
+        agent_remap[ac.agent_call_id] = new_aid
         append_agent_call(
             run.root,
-            ac.model_copy(update={"agent_call_id": next_agent_call_id(run.root)}),
+            ac.model_copy(update={"agent_call_id": new_aid}),
+            evidence_root=evidence_root,
+        )
+
+    # 6b. Per-agent LLM token usage (live agents only) - remap to the committed agent_call_id.
+    for tu in read_agent_token_usage(src.root):
+        append_agent_token_usage(
+            run.root,
+            tu.model_copy(
+                update={"agent_call_id": agent_remap.get(tu.agent_call_id, tu.agent_call_id)}
+            ),
             evidence_root=evidence_root,
         )
 

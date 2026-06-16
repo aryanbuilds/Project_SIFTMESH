@@ -27,6 +27,7 @@ from siftmesh_core.evidence.path_policy import safe_write_path
 from siftmesh_core.ledgers.custody_ledger import append_event
 from siftmesh_core.ledgers.tool_call_ledger import append_tool_result, read_tool_results
 from siftmesh_core.mcp_gateway.backends import BackendUnavailableError
+from siftmesh_core.mcp_gateway.exec_lock import run_dir_exec_lock
 from siftmesh_core.schemas.custody import CustodyEvent
 from siftmesh_core.schemas.tool_result import ToolResult, ToolStatus
 
@@ -119,7 +120,42 @@ def run_tool(
     ``produce`` returns the structured payload (the ``result_cls`` extra fields).
     On success the payload is written + merged into the typed result; on a
     recoverable error an empty ``status=error`` result is logged and returned.
+
+    Serialized per run dir (``run_dir_exec_lock``) so concurrent live-agent ``mcp-serve``
+    children sharing one run dir cannot race the ``TOOL-NNN`` / ``ALERT-NNN`` length-based
+    allocators and mint a duplicate id (audit-trail integrity, criterion 5). The lock is
+    per-run-dir, so parallel dispatch (separate staging dirs) is unaffected, and it changes
+    no id values in a serial run (golden byte-identical).
     """
+    with run_dir_exec_lock(run_root):
+        return _run_tool_locked(
+            run_root,
+            result_cls=result_cls,
+            tool_name=tool_name,
+            source_artifact=source_artifact,
+            source_sha256=source_sha256,
+            backend=backend,
+            produce=produce,
+            tool_version=tool_version,
+            evidence_root=evidence_root,
+            write_structured=write_structured,
+        )
+
+
+def _run_tool_locked(
+    run_root: Path | str,
+    *,
+    result_cls: type[ToolResultT],
+    tool_name: str,
+    source_artifact: str,
+    source_sha256: str,
+    backend: str,
+    produce: Callable[[], dict[str, Any]],
+    tool_version: str = __version__,
+    evidence_root: Path | str | None = None,
+    write_structured: bool = True,
+) -> ToolResultT:
+    """Provenanced tool body; always called under ``run_dir_exec_lock`` via :func:`run_tool`."""
     tool_call_id = _next_tool_call_id(run_root)
     # Normalise the write-exclusion root: a derived task's evidence_root IS the run dir, which would
     # otherwise block the tool from writing its own outputs (hth.2). Source resolution already

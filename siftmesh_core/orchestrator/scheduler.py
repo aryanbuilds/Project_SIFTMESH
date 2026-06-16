@@ -30,10 +30,21 @@ from siftmesh_core.schemas.task import TaskContract
 from siftmesh_core.schemas.task_result import TaskResult
 from siftmesh_core.schemas.yaml_io import read_yaml_model
 
-# Heavy, tool-bound tasks that add nothing under a live agent (the tool does the work) and time
-# out its wrapper - run on the deterministic floor even when a live agent is selected, unless the
-# operator forces `live_extraction` (`run --all-live`). Executor tiering (scale fixes).
-_HEAVY_TOOL_BOUND = frozenset({"extract_artifacts_from_image", "analyze_memory"})
+# Heavy or high-volume tool-bound tasks that add nothing under a live agent (the tool does the work)
+# and either time out its wrapper (image/memory) or overflow its context with thousands of tabular
+# rows ($MFT / USN journal / Plaso super-timeline) - run on the deterministic floor even when a live
+# agent is selected, unless the operator forces `live_extraction` (`run --all-live`). The floor has
+# real claim builders for all of these, so floor-routing yields anchored claims instead of a live
+# agent that cannot anchor the volume and gets quarantined. Executor tiering (scale fixes).
+_HEAVY_TOOL_BOUND = frozenset(
+    {
+        "extract_artifacts_from_image",
+        "analyze_memory",
+        "parse_mft_filesystem",
+        "parse_usnjrnl",
+        "build_super_timeline",
+    }
+)
 
 
 def _has_derived_input(contract: TaskContract) -> bool:

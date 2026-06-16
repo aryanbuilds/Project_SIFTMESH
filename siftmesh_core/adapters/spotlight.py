@@ -93,8 +93,23 @@ def scan_injection(text: str) -> list[InjectionMatch]:
         blob = m.group(0).rstrip("=")
         if _HEX_TOKEN.match(blob):  # a hash / hex id is not a base64 injection blob
             continue
+        if _looks_like_path(blob):  # a nested file path is not a base64 injection blob
+            continue
         matches.append(InjectionMatch("base64_blob", _snippet(text, m.start(), m.end()), m.span()))
     return matches
+
+
+def _looks_like_path(blob: str) -> bool:
+    """True if a base64-charset blob is really a nested file path, not an injection payload.
+
+    The blob comes from ``[A-Za-z0-9+/]{40,}`` so it can only carry ``+`` and ``/`` as non-alnum
+    chars. A real base64 encoding of binary data averages well under one ``/`` per 40 chars and
+    frequently contains ``+``; a path (``evidence/extracted/Prefetch/...``) has many ``/`` and no
+    ``+``. So "two or more slashes AND no ``+``" is a path, not a payload - this kills the DFIR
+    false-positive flood (file paths in our own tool-result JSON) while still flagging a genuine
+    base64-encoded command (no ``/``, or with ``+``).
+    """
+    return blob.count("/") >= 2 and "+" not in blob
 
 
 def _snippet(text: str, start: int, end: int, *, pad: int = 24, limit: int = 200) -> str:

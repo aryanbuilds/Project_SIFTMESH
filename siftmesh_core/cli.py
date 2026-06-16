@@ -1582,7 +1582,14 @@ def claims_show(run_dir: str, claim_id: str) -> None:
     raise typer.Exit(code=1)
 
 
-_AUDIT_LEDGERS = ("events", "tool-calls", "agent-calls", "retries", "token-budget")
+_AUDIT_LEDGERS = (
+    "events",
+    "tool-calls",
+    "agent-calls",
+    "agent-tokens",
+    "retries",
+    "token-budget",
+)
 
 
 @audit_app.command("tail")
@@ -1591,7 +1598,9 @@ def audit_tail(
     lines: Annotated[int, typer.Option("--lines", "-n", help="How many trailing lines.")] = 20,
     ledger: Annotated[
         str,
-        typer.Option(help="events | tool-calls | agent-calls | retries | token-budget"),
+        typer.Option(
+            help="events | tool-calls | agent-calls | agent-tokens | retries | token-budget"
+        ),
     ] = "events",
 ) -> None:
     """Tail an audit ledger (raw JSONL lines, newest last; read-only)."""
@@ -1600,6 +1609,7 @@ def audit_tail(
         "events": run.orchestration_events,
         "tool-calls": run.tool_calls,
         "agent-calls": run.agent_calls,
+        "agent-tokens": run.agent_tokens,
         "retries": run.retries,
         "token-budget": run.token_budget,
     }

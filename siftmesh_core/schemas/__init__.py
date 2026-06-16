@@ -21,6 +21,7 @@ from siftmesh_core.schemas.agent_profile import (
     ModelTier,
     OutputFormat,
 )
+from siftmesh_core.schemas.agent_token_usage import AgentTokenUsage
 from siftmesh_core.schemas.audit import CriticVerdict, CriticVerdictType, ToolCall
 from siftmesh_core.schemas.claim import Claim, ClaimStatus, validate_claim_evidence
 from siftmesh_core.schemas.critic_records import (
@@ -87,6 +88,7 @@ _EXPORTED_MODELS: tuple[type[StrictModel], ...] = (
     PlanStep,
     TaskResult,
     AgentCall,
+    AgentTokenUsage,
     InjectionAlert,
     ContradictionRecord,
     ConfidenceChange,
@@ -118,6 +120,7 @@ __all__ = [
     "AgentCallStatus",
     "AgentKind",
     "AgentProfile",
+    "AgentTokenUsage",
     "ArtifactMode",
     "ArtifactOrigin",
     "CapabilityCheck",

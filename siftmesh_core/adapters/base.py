@@ -75,10 +75,11 @@ class ExecutorAdapter(ABC):
         ref = write_task_result(ctx.run, result, evidence_root=ctx.evidence_root)
         requested = ctx.requested_profile or self.profile_id
         fell_back = requested if requested != self.profile_id else None
+        agent_call_id = next_agent_call_id(ctx.run.root)
         append_agent_call(
             ctx.run.root,
             AgentCall(
-                agent_call_id=next_agent_call_id(ctx.run.root),
+                agent_call_id=agent_call_id,
                 task_id=contract.task_id,
                 profile=requested,
                 adapter=self.profile_id,
@@ -91,7 +92,44 @@ class ExecutorAdapter(ABC):
             ),
             evidence_root=ctx.evidence_root,
         )
+        self._record_token_usage(ctx, contract.task_id, agent_call_id, requested, end)
         return ref
+
+    def _record_token_usage(
+        self,
+        ctx: AdapterContext,
+        task_id: str,
+        agent_call_id: str,
+        profile: str,
+        recorded_utc: datetime,
+    ) -> None:
+        """Append one ``agent_tokens.jsonl`` line when a live adapter reported LLM usage.
+
+        The deterministic floor never sets ``_token_usage`` -> no record (golden byte-identical).
+        """
+        usage = getattr(self, "_token_usage", None)
+        if usage is None:
+            return
+        from siftmesh_core.ledgers.agent_tokens import append_agent_token_usage
+        from siftmesh_core.schemas.agent_token_usage import AgentTokenUsage
+
+        append_agent_token_usage(
+            ctx.run.root,
+            AgentTokenUsage(
+                agent_call_id=agent_call_id,
+                task_id=task_id,
+                profile=profile,
+                model=usage.model,
+                input_tokens=usage.input_tokens,
+                output_tokens=usage.output_tokens,
+                total_tokens=usage.total_tokens,
+                cache_read_tokens=usage.cache_read_tokens,
+                cache_creation_tokens=usage.cache_creation_tokens,
+                cost_usd=usage.cost_usd,
+                recorded_utc=recorded_utc,
+            ),
+            evidence_root=ctx.evidence_root,
+        )
 
     @abstractmethod
     def _execute(self, contract: TaskContract, ctx: AdapterContext) -> TaskResult:

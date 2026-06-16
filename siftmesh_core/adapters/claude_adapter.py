@@ -36,6 +36,7 @@ from siftmesh_core.adapters.profiles import effective_model
 from siftmesh_core.adapters.prompt_builder import build_task_prompt
 from siftmesh_core.adapters.sandbox import minimal_child_env, scratch_cwd
 from siftmesh_core.adapters.spotlight import scan_injection
+from siftmesh_core.adapters.token_usage import extract_claude_usage
 from siftmesh_core.evidence.path_policy import safe_write_path
 from siftmesh_core.ledgers.injection_alerts import append_injection_alert, next_alert_id
 from siftmesh_core.schemas.injection_alert import InjectionAlert
@@ -300,6 +301,9 @@ class ClaudeHeadlessAdapter(ExecutorAdapter):
         except json.JSONDecodeError:
             return self._error(contract, ctx, started, "agent_bad_json")
         result_text = str(envelope.get("result", ""))
+        # Record the LLM token usage this dispatch reported (base.run() writes it to the audit
+        # trail keyed to the agent_call_id). Fail-soft: None when the envelope has no usage.
+        self._token_usage = extract_claude_usage(envelope)
         self._scan(ctx, contract, result_text)  # injection scan on the agent's final message
         if envelope.get("is_error", proc.returncode != 0):
             return self._error(contract, ctx, started, str(envelope.get("subtype", "agent_error")))
