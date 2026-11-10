@@ -11,11 +11,14 @@ out-of-tree target (the MVP forensic-safe choice).
 from __future__ import annotations
 
 import hashlib
+import json
 import os
 from collections.abc import Callable, Iterator
+from contextlib import ExitStack
 from dataclasses import dataclass
 from datetime import UTC, datetime
 from pathlib import Path
+from typing import TextIO
 
 
 @dataclass(frozen=True)
@@ -26,6 +29,20 @@ class FileFact:
     sha256: str
     size_bytes: int
     mtime_utc: datetime
+
+
+# Per-access re-hash policy (D730): files at or below this size get a full
+# SHA-256 re-hash after every tool access; larger files use a stat fast-path
+# (size + mtime_ns) and pay for a full re-hash only when the stat differs.
+# 64MB keeps the $MFT-class artifacts (hundreds of MB) off the full re-read
+# path while every small artifact keeps byte-exact verification.
+REHASH_FULL_BYTES: int = 64 * 1024 * 1024
+
+
+def stat_sig(path: Path | str) -> tuple[int, int]:
+    """Return the ``(size_bytes, mtime_ns)`` integrity fast-path signature."""
+    st = Path(path).stat()
+    return (st.st_size, st.st_mtime_ns)
 
 
 def sha256_file(path: Path | str) -> str:
@@ -85,28 +102,100 @@ def walk_files(
     base: Path | str,
     *,
     on_progress: Callable[[FileFact], None] | None = None,
+    checkpoint_path: Path | str | None = None,
 ) -> list[FileFact]:
     """Walk ``base`` recursively, returning sorted :class:`FileFact`s.
 
     Deterministic ordering (sorted by POSIX rel_path). ``on_progress`` (if given)
     is called once per hashed file, in walk order, before the final sort.
+
+    Resumable ingest (D-eqo): when ``checkpoint_path`` is given, completed facts
+    persist as JSONL (one flushed line per file, crash-safe) and a re-run reuses
+    any entry whose ``(size_bytes, mtime_ns)`` still matches - only new or
+    changed files pay for a re-hash. A missing checkpoint starts fresh.
     """
+    completed = load_checkpoint(checkpoint_path) if checkpoint_path is not None else {}
+    with ExitStack() as stack:
+        checkpoint_out: TextIO | None = (
+            stack.enter_context(Path(checkpoint_path).open("a", encoding="utf-8"))
+            if checkpoint_path is not None
+            else None
+        )
+        facts = _walk_inner(base, completed, checkpoint_out, on_progress)
+    facts.sort(key=lambda fact: fact.rel_path)
+    return facts
+
+
+def _walk_inner(
+    base: Path | str,
+    completed: dict[str, tuple[str, int, int]],
+    checkpoint_out: TextIO | None,  # flushed per fact, crash-safe
+    on_progress: Callable[[FileFact], None] | None,
+) -> list[FileFact]:
     base = Path(base)
     facts: list[FileFact] = []
     for fpath, fstat in _iter_regular_files(base):
-        try:
-            digest = sha256_file(fpath)
-        except OSError:
-            continue
-        fact = FileFact(
-            rel_path=fpath.relative_to(base).as_posix(),
-            sha256=digest,
-            size_bytes=fstat.st_size,
-            mtime_utc=datetime.fromtimestamp(fstat.st_mtime, tz=UTC),
-        )
+        rel = fpath.relative_to(base).as_posix()
+        prior = completed.get(rel)
+        if prior is not None and (fstat.st_size, fstat.st_mtime_ns) == (prior[1], prior[2]):
+            fact = FileFact(
+                rel_path=rel,
+                sha256=prior[0],
+                size_bytes=prior[1],
+                mtime_utc=datetime.fromtimestamp(fstat.st_mtime, tz=UTC),
+            )
+        else:
+            try:
+                digest = sha256_file(fpath)
+            except OSError:
+                continue
+            fact = FileFact(
+                rel_path=rel,
+                sha256=digest,
+                size_bytes=fstat.st_size,
+                mtime_utc=datetime.fromtimestamp(fstat.st_mtime, tz=UTC),
+            )
+            if checkpoint_out is not None:
+                checkpoint_out.write(
+                    json.dumps(
+                        {
+                            "rel_path": rel,
+                            "sha256": digest,
+                            "size_bytes": fstat.st_size,
+                            "mtime_ns": fstat.st_mtime_ns,
+                        }
+                    )
+                    + "\n"
+                )
+                checkpoint_out.flush()
         facts.append(fact)
         if on_progress is not None:
             on_progress(fact)
-
-    facts.sort(key=lambda fact: fact.rel_path)
     return facts
+
+
+def load_checkpoint(path: Path | str) -> dict[str, tuple[str, int, int]]:
+    """Read a ``walk_files`` checkpoint: ``rel_path -> (sha256, size_bytes, mtime_ns)``.
+
+    Missing file = fresh start. A corrupt line fails closed (the checkpoint is
+    untrusted crash residue, not evidence - but silently skipping it would hide
+    a bug, so surface it).
+    """
+    completed: dict[str, tuple[str, int, int]] = {}
+    try:
+        text = Path(path).read_text(encoding="utf-8")
+    except FileNotFoundError:
+        return completed
+    for lineno, line in enumerate(text.splitlines(), start=1):
+        if not line.strip():
+            continue
+        try:
+            record = json.loads(line)
+            completed[str(record["rel_path"])] = (
+                str(record["sha256"]),
+                int(record["size_bytes"]),
+                int(record["mtime_ns"]),
+            )
+        except (ValueError, KeyError, TypeError) as exc:
+            raise ValueError(f"corrupt ingest checkpoint {path}:{lineno}: {exc}") from exc
+    return completed

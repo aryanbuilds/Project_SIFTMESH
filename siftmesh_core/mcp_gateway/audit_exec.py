@@ -22,12 +22,13 @@ from typing import Any, TypeVar
 
 from siftmesh_core import __version__
 from siftmesh_core.evidence.derived import DerivedArtifact, append_derived
-from siftmesh_core.evidence.hash_utils import sha256_file
+from siftmesh_core.evidence.hash_utils import REHASH_FULL_BYTES, sha256_file, stat_sig
 from siftmesh_core.evidence.path_policy import safe_write_path
-from siftmesh_core.ledgers.custody_ledger import append_event
+from siftmesh_core.ledgers.custody_ledger import append_event, verify_after_access
 from siftmesh_core.ledgers.tool_call_ledger import append_tool_result, read_tool_results
 from siftmesh_core.mcp_gateway.backends import BackendUnavailableError
 from siftmesh_core.mcp_gateway.exec_lock import run_dir_exec_lock
+from siftmesh_core.mcp_gateway.tools._common import try_resolve_source
 from siftmesh_core.schemas.custody import CustodyEvent
 from siftmesh_core.schemas.tool_result import ToolResult, ToolStatus
 
@@ -114,6 +115,7 @@ def run_tool(
     tool_version: str = __version__,
     evidence_root: Path | str | None = None,
     write_structured: bool = True,
+    rehash_threshold_bytes: int = REHASH_FULL_BYTES,
 ) -> ToolResultT:
     """Run ``produce`` with full provenance; append one ``tool_calls.jsonl`` line.
 
@@ -121,6 +123,10 @@ def run_tool(
     On success the payload is written + merged into the typed result; on a
     recoverable error an empty ``status=error`` result is logged and returned.
 
+    Post-access integrity (D730): the source is pre-statted before ``produce``
+    and re-verified after - full SHA-256 for files at or below
+    ``rehash_threshold_bytes``, stat fast-path above it. A mismatch becomes
+    ``status=error`` (``integrity_mismatch``), feeding the genuine-retry path.
     Serialized per run dir (``run_dir_exec_lock``) so concurrent live-agent ``mcp-serve``
     children sharing one run dir cannot race the ``TOOL-NNN`` / ``ALERT-NNN`` length-based
     allocators and mint a duplicate id (audit-trail integrity, criterion 5). The lock is
@@ -139,6 +145,7 @@ def run_tool(
             tool_version=tool_version,
             evidence_root=evidence_root,
             write_structured=write_structured,
+            rehash_threshold_bytes=rehash_threshold_bytes,
         )
 
 
@@ -154,9 +161,21 @@ def _run_tool_locked(
     tool_version: str = __version__,
     evidence_root: Path | str | None = None,
     write_structured: bool = True,
+    rehash_threshold_bytes: int = REHASH_FULL_BYTES,
 ) -> ToolResultT:
     """Provenanced tool body; always called under ``run_dir_exec_lock`` via :func:`run_tool`."""
     tool_call_id = _next_tool_call_id(run_root)
+    # Post-access integrity baseline (D730): pre-stat the source BEFORE the
+    # write-exclusion root is normalised, using the same trusted-roots logic as
+    # the wrappers' ``resolved_source``. Unresolvable here means the wrapper
+    # already failed - skip the after-check rather than double-fault.
+    pre_source = try_resolve_source(evidence_root, source_artifact, run_root=run_root)
+    pre_stat: tuple[int, int] | None = None
+    if pre_source is not None:
+        try:
+            pre_stat = stat_sig(pre_source)
+        except OSError:
+            pre_source = None
     # Normalise the write-exclusion root: a derived task's evidence_root IS the run dir, which would
     # otherwise block the tool from writing its own outputs (hth.2). Source resolution already
     # happened in the tool wrapper; here evidence_root governs writes only.
@@ -173,6 +192,24 @@ def _run_tool_locked(
     except RecoverableToolError as exc:
         status, error_code = "error", exc.code
     end = datetime.now(UTC)
+
+    if status == "success" and pre_source is not None and pre_stat is not None:
+        try:
+            after_ok = verify_after_access(
+                run_root,
+                run_id=Path(run_root).resolve().name,
+                artifact=source_artifact,
+                baseline_sha256=source_sha256,
+                source_path=pre_source,
+                pre_size=pre_stat[0],
+                pre_mtime_ns=pre_stat[1],
+                full_hash_above_bytes=rehash_threshold_bytes,
+                evidence_root=evidence_root,
+            )
+        except OSError:
+            after_ok = False  # source vanished mid-parse: fail closed
+        if not after_ok:
+            status, error_code = "error", "integrity_mismatch"
 
     # A tool may emit a raw byte/text artifact (e.g. a wrapped CLI's native JSON)
     # via sentinel keys in its payload; pop them before the payload becomes result

@@ -17,7 +17,7 @@ from datetime import UTC, datetime
 from pathlib import Path
 
 from siftmesh_core import __version__
-from siftmesh_core.evidence.hash_utils import sha256_file
+from siftmesh_core.evidence.hash_utils import REHASH_FULL_BYTES, sha256_file, stat_sig
 from siftmesh_core.evidence.path_policy import safe_write_path
 from siftmesh_core.schemas.custody import CustodyEvent
 
@@ -89,6 +89,52 @@ def verify_unchanged(
         artifact=artifact,
         source_sha256=baseline_sha256,
         action="rehash",
+        actor="siftmesh",
+        tool_name="hash_utils",
+        tool_version=__version__,
+        start_time_utc=start,
+        end_time_utc=end,
+        result="ok" if matched else "mismatch",
+    )
+    append_event(run_root, event, evidence_root=evidence_root)
+    return matched
+
+
+def verify_after_access(
+    run_root: Path | str,
+    *,
+    run_id: str,
+    artifact: str,
+    baseline_sha256: str,
+    source_path: Path | str,
+    pre_size: int,
+    pre_mtime_ns: int,
+    full_hash_above_bytes: int = REHASH_FULL_BYTES,
+    evidence_root: Path | str | None = None,
+) -> bool:
+    """Post-access integrity check; record ``source_rehash_verified``; return matched.
+
+    Size-aware (D730): files at or below ``full_hash_above_bytes`` always pay for a
+    full SHA-256 re-read; larger files take the ``(size, mtime_ns)`` stat fast-path
+    and fall back to a full re-hash only when the post-access stat differs from the
+    pre-access one (``pre_size`` / ``pre_mtime_ns``). The method is recorded in the
+    event ``action`` (``rehash_full`` vs ``rehash_stat``).
+    """
+    start = datetime.now(UTC)
+    size, mtime_ns = stat_sig(source_path)
+    if size <= full_hash_above_bytes or (size, mtime_ns) != (pre_size, pre_mtime_ns):
+        matched = sha256_file(source_path) == baseline_sha256
+        method = "full"
+    else:
+        matched = True
+        method = "stat"
+    end = datetime.now(UTC)
+    event = CustodyEvent(
+        event_type="source_rehash_verified",
+        run_id=run_id,
+        artifact=artifact,
+        source_sha256=baseline_sha256,
+        action=f"rehash_{method}",
         actor="siftmesh",
         tool_name="hash_utils",
         tool_version=__version__,

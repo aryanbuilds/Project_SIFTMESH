@@ -21,7 +21,7 @@ from siftmesh_core.evidence.hash_utils import FileFact, scan_totals, walk_files
 from siftmesh_core.evidence.manifest import build_manifest, write_hashes_sha256, write_manifest
 from siftmesh_core.evidence.path_policy import assert_run_outside_evidence
 from siftmesh_core.evidence.policy import write_evidence_policy
-from siftmesh_core.evidence.readonly import write_readonly_record
+from siftmesh_core.evidence.readonly import ensure_os_readonly, write_readonly_record
 from siftmesh_core.ledgers.audit_log import log_event, open_orchestration_log
 from siftmesh_core.ledgers.custody_ledger import record_ingest, verify_unchanged
 from siftmesh_core.run_dir import RunPaths, new_run_dir
@@ -29,6 +29,11 @@ from siftmesh_core.run_dir import RunPaths, new_run_dir
 
 class EvidenceModifiedError(RuntimeError):
     """Raised when ``verify_after`` detects an original changed during the run."""
+
+
+# Resumable-ingest checkpoint (D-eqo): lives beside ``case_runs/`` in the case
+# dir so it survives an interrupted run, and dies once a run completes.
+CHECKPOINT_NAME = ".siftmesh-ingest-checkpoint.jsonl"
 
 
 def _make_progress_printer(total_files: int, total_bytes: int) -> Callable[[FileFact], None]:
@@ -66,6 +71,7 @@ def init_case(
     show_progress: bool = False,
     brief_path: Path | str | None = None,
     objective_text: str | None = None,
+    resume: bool = False,
 ) -> RunPaths:
     """Ingest evidence into a fresh run dir; return its :class:`RunPaths`.
 
@@ -86,16 +92,27 @@ def init_case(
     run = new_run_dir(base=run_base, run_name=run_name)
     assert_run_outside_evidence(run.root, evidence_path)
 
+    checkpoint = case_path / CHECKPOINT_NAME
+    if not resume:
+        checkpoint.unlink(missing_ok=True)
+
     audit = open_orchestration_log(run.orchestration_events, run.run_id)
     log_event(audit, "init_case_start", case=case_path.name, evidence=str(evidence_path.resolve()))
 
+    os_enforced, mount_note = ensure_os_readonly(evidence_path, run.root / "evidence_ro")
+    active_evidence = run.root / "evidence_ro" if os_enforced else evidence_path
+    enforcement = "os_bind_mount_ro" if os_enforced else "posture_only"
+    log_event(audit, "evidence_mount", enforcement=enforcement, note=mount_note)
+
     on_progress: Callable[[FileFact], None] | None = None
     if show_progress:
-        total_files, total_bytes = scan_totals(evidence_path)
+        total_files, total_bytes = scan_totals(active_evidence)
         on_progress = _make_progress_printer(total_files, total_bytes)
 
     ingest_started = datetime.now(UTC)
-    facts = walk_files(evidence_path, on_progress=on_progress)
+    facts = walk_files(
+        active_evidence, on_progress=on_progress, checkpoint_path=checkpoint if resume else None
+    )
     ingest_ended = datetime.now(UTC)
     if show_progress:
         sys.stderr.write("\n")
@@ -119,14 +136,14 @@ def init_case(
 
         if brief_path is not None and objective_text is not None:
             brief_md, objective = ingest_brief_and_objective(
-                brief_path, objective_text, run, evidence_root=evidence_path
+                brief_path, objective_text, run, evidence_root=active_evidence
             )
         elif brief_path is not None:
-            brief_md, objective = ingest_brief(brief_path, run, evidence_root=evidence_path)
+            brief_md, objective = ingest_brief(brief_path, run, evidence_root=active_evidence)
         else:
             assert objective_text is not None
             brief_md, objective = ingest_objective_text(
-                objective_text, run, evidence_root=evidence_path
+                objective_text, run, evidence_root=active_evidence
             )
         manifest = manifest.model_copy(
             update={
@@ -137,17 +154,23 @@ def init_case(
             }
         )
         log_event(audit, "incident_brief_recorded", objective_chars=len(objective))
-    write_manifest(manifest, run.root, evidence_root=evidence_path)
-    write_hashes_sha256(manifest, run.root, evidence_root=evidence_path)
+    write_manifest(manifest, run.root, evidence_root=active_evidence)
+    write_hashes_sha256(manifest, run.root, evidence_root=active_evidence)
     log_event(audit, "manifest_written", files=len(manifest.files))
 
-    write_readonly_record(evidence_path, run.root, file_count=len(facts))
-    init_registry(run.root, evidence_root=evidence_path)
+    write_readonly_record(
+        active_evidence,
+        run.root,
+        file_count=len(facts),
+        enforcement=enforcement,
+        original_path=evidence_path,
+    )
+    init_registry(run.root, evidence_root=active_evidence)
     write_evidence_policy(
         run.root,
         case_id=case_path.name,
         run_id=run.run_id,
-        evidence_root=str(evidence_path.resolve()),
+        evidence_root=str(active_evidence.resolve()),
         file_count=len(facts),
     )
 
@@ -159,7 +182,7 @@ def init_case(
             source_sha256=fact.sha256,
             start_time_utc=ingest_started,
             end_time_utc=ingest_ended,
-            evidence_root=evidence_path,
+            evidence_root=active_evidence,
         )
     log_event(audit, "custody_recorded", events=len(facts))
 
@@ -170,8 +193,8 @@ def init_case(
                 run_id=run.run_id,
                 artifact=fact.rel_path,
                 baseline_sha256=fact.sha256,
-                source_path=evidence_path / fact.rel_path,
-                evidence_root=evidence_path,
+                source_path=active_evidence / fact.rel_path,
+                evidence_root=active_evidence,
             ):
                 log_event(audit, "evidence_modified", artifact=fact.rel_path)
                 raise EvidenceModifiedError(
@@ -179,5 +202,6 @@ def init_case(
                 )
         log_event(audit, "rehash_verified", file_count=len(facts))
 
+    checkpoint.unlink(missing_ok=True)
     log_event(audit, "init_case_done", run=run.run_id)
     return run

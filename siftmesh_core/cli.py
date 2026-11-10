@@ -138,6 +138,14 @@ def init_case(
             help="Re-hash originals at end of run (off by default; costly for huge data).",
         ),
     ] = False,
+    resume: Annotated[
+        bool,
+        typer.Option(
+            "--resume",
+            help="Resume an interrupted ingest: reuse checkpointed hashes for "
+            "unchanged files instead of re-hashing 100+GB from scratch.",
+        ),
+    ] = False,
 ) -> None:
     """Hash + seal evidence into a new run dir (manifest, custody, policy)."""
     try:
@@ -149,6 +157,7 @@ def init_case(
             show_progress=True,
             brief_path=brief,
             objective_text=objective,
+            resume=resume,
         )
     except (
         FileNotFoundError,

@@ -11,11 +11,10 @@ automatically at `init-case` and is part of the run's audit trail.
 - SIFTMesh opens every original in binary read mode only and **never** writes to a source path.
 - All SIFTMesh-controlled writes are forced through a central path-policy write-gate that rejects
   any target outside the run directory or inside the original evidence tree.
-- **Scope of the software guard:** this is enforced for SIFTMesh's own code paths (no raw shell, no
-  destructive tools - see the safety policy). It is recorded as `enforcement: posture_only` in
-  `evidence/readonly_mounts.json`; it is **not** OS-level read-only mount enforcement
-  (`mount -o ro` / `blockdev --setro`), which is a documented Linux enhancement deferred to a
-  later stage.
+- **Enforcement level for this run** is recorded as `enforcement` in
+  `evidence/readonly_mounts.json`: `posture_only` (the software guarantee above),
+  or `os_bind_mount_ro` where the Linux host granted mount privileges and the
+  read-only bind mount verified via `/proc/mounts`.
 
 ## 2. Working copies vs. read-only-in-place (large-evidence strategy)
 

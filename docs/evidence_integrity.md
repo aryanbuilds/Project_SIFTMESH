@@ -32,7 +32,7 @@ every derived artifact and tool read so a finding traces to exact bytes. Read wi
 |---|---|---|
 | `evidence_manifest.json` | One row per source: path, size, sha256, type, ingest time. | `evidence/manifest.py` |
 | `hashes.sha256` | Flat `sha256␠␠path` list (standard `sha256sum -c` format). | `evidence/manifest.py` |
-| `readonly_mounts.json` | The read-only posture record (`enforcement: posture_only`, sources, access). | `evidence/readonly.py` |
+| `readonly_mounts.json` | The read-only record (`enforcement: posture_only`, or `os_bind_mount_ro` with `original_path` where the Linux host granted a verified ro bind mount; sources, access). | `evidence/readonly.py` |
 | `derived_artifacts.json` | Artifacts produced by tools (extracted/decompressed), with provenance + hash. | extraction/decompress tools |
 | `custody_log.jsonl` | Append-only custody events (ingest, derive, access). | evidence layer |
 
@@ -52,7 +52,11 @@ source_artifact, *, run_root=None)`, which:
   `extract_artifacts_from_image` / `decompress` write `evidence/extracted/…`;
 - **rejects any path that escapes every trusted root** (`..`, absolute, symlink-out) with
   `ValueError`, since case data is hostile (CLAUDE §6);
-- **re-hashes the exact bytes** it is about to parse, and returns `(real_path, sha256)`.
+- **re-hashes the exact bytes** it is about to parse, and returns `(real_path, sha256)`;
+- after the parse, `audit_exec.run_tool` re-verifies the source (full SHA-256 at or
+  below 64 MB, `(size, mtime_ns)` stat fast-path above it with full re-hash on any
+  stat drift) and records `source_rehash_verified`; a mismatch fails the tool as
+  `integrity_mismatch` instead of persisting tainted results.
 
 That returned sha256 becomes the claim's `source_sha256`, which anchors a finding to the
 bytes actually analysed rather than to a path that might have changed. Admitting the run
@@ -66,8 +70,10 @@ and the dual-root containment is regression-tested (`test_bypass_agent_sandbox.p
 `evidence/readonly.py` records `enforcement: posture_only`: SIFTMesh opens originals
 read-only and never writes to a source, and `safe_write_path(evidence_root=…)` refuses any
 write under the evidence tree. This is **construction-level** integrity rather than an
-OS-level read-only mount (`mount -o ro` / `blockdev --setro`), a documented Linux
-enhancement deferred to a later epic (bd `7h7`). A privileged external process on the host
+OS-level read-only mount (`mount -o ro` / `blockdev --setro`): since D-7h7,
+`init-case` attempts a verified read-only bind mount on Linux and records
+`enforcement: os_bind_mount_ro` when `/proc/mounts` confirms it, else the honest
+`posture_only`. A privileged external process on the host
 sits outside SIFTMesh's scope. We do not claim court-ready forensic soundness.
 
 ---

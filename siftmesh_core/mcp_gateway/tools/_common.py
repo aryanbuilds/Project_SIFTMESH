@@ -15,6 +15,34 @@ from pathlib import Path
 from siftmesh_core.evidence.hash_utils import sha256_file
 
 
+def try_resolve_source(
+    evidence_root: Path | str | None,
+    source_artifact: str,
+    *,
+    run_root: Path | str | None = None,
+) -> Path | None:
+    """Return the trusted real path for ``source_artifact``, or ``None``.
+
+    Same roots logic as :func:`resolved_source` but non-raising, for the
+    post-access integrity check (a missing source after a successful parse is
+    reported by the caller, not raised here).
+    """
+    roots: list[Path] = []
+    if evidence_root is not None:
+        roots.append(Path(evidence_root).resolve())
+    if run_root is not None:
+        run_resolved = Path(run_root).resolve()
+        if run_resolved not in roots:
+            roots.append(run_resolved)
+    for root in roots:
+        path = (root / source_artifact).resolve()
+        if not path.is_relative_to(root):
+            continue  # escapes this root - try the next trusted root
+        if path.is_file():
+            return path
+    return None
+
+
 def resolved_source(
     evidence_root: Path | str,
     source_artifact: str,
